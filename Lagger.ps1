@@ -40,6 +40,11 @@ function Test-NetQos {
     return $null -ne (Get-Command -Name Get-NetQosPolicy -ErrorAction SilentlyContinue)
 }
 
+function Test-FirewallService {
+    $svc = Get-Service -Name MpsSvc -ErrorAction SilentlyContinue
+    return ($null -ne $svc -and $svc.Status -eq "Running")
+}
+
 function Apply-Throttle([long]$bps) {
     $existing = Get-NetQosPolicy -Name $policyName -PolicyStore $policyStore -ErrorAction SilentlyContinue
     if ($null -eq $existing) {
@@ -50,25 +55,39 @@ function Apply-Throttle([long]$bps) {
 }
 
 function Ensure-BlockRule {
-    Remove-NetFirewallRule -DisplayName $blockRuleName -PolicyStore $policyStore -ErrorAction SilentlyContinue | Out-Null
-    $ruleParams = @{
-        DisplayName = $blockRuleName
-        Direction   = "Outbound"
-        Action      = "Block"
-        Enabled     = "False"
-        Profile     = "Any"
-        Protocol    = "Any"
-        PolicyStore = $policyStore
+    try {
+        Remove-NetFirewallRule -DisplayName $blockRuleName -PolicyStore $policyStore -ErrorAction SilentlyContinue | Out-Null
+        $ruleParams = @{
+            DisplayName = $blockRuleName
+            Direction   = "Outbound"
+            Action      = "Block"
+            Enabled     = "False"
+            Profile     = "Any"
+            Protocol    = "Any"
+            PolicyStore = $policyStore
+        }
+        if ($targetPorts.Count -gt 0) {
+            $ruleParams.RemotePort = ($targetPorts -join ",")
+        }
+        New-NetFirewallRule @ruleParams | Out-Null
+    } catch {
+        $script:lossEnabled = $false
+        [System.Windows.Forms.MessageBox]::Show(
+            "No se pudo crear la regla de firewall (MpsSvc deshabilitado o politica de seguridad). Se desactiva la perdida.",
+            "Lagger",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        ) | Out-Null
     }
-    if ($targetPorts.Count -gt 0) {
-        $ruleParams.RemotePort = ($targetPorts -join ",")
-    }
-    New-NetFirewallRule @ruleParams | Out-Null
 }
 
 function Set-BlockRule([bool]$enabled) {
     $state = if ($enabled) { "True" } else { "False" }
-    Set-NetFirewallRule -DisplayName $blockRuleName -PolicyStore $policyStore -Enabled $state -ErrorAction SilentlyContinue | Out-Null
+    try {
+        Set-NetFirewallRule -DisplayName $blockRuleName -PolicyStore $policyStore -Enabled $state -ErrorAction SilentlyContinue | Out-Null
+    } catch {
+        $script:lossEnabled = $false
+    }
 }
 
 function Stop-Lag {
@@ -234,14 +253,25 @@ $btnToggle.Add_Click({
             ) | Out-Null
             return
         }
+        if ($lossEnabled -and -not (Test-FirewallService)) {
+            $lossEnabled = $false
+            [System.Windows.Forms.MessageBox]::Show(
+                "El servicio de Firewall (MpsSvc) no esta activo. Se desactiva la perdida por firewall.",
+                "Lagger",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            ) | Out-Null
+        }
 
         try {
             $running = $true
             $stepIndex = 0
             $baseRateBps = $rates[$stepIndex].BitsPerSecond
             Apply-Throttle $baseRateBps
-            Ensure-BlockRule
-            Set-BlockRule $false
+            if ($lossEnabled) {
+                Ensure-BlockRule
+                Set-BlockRule $false
+            }
             Update-Status
             if ($rates.Count -gt 1) {
                 $timer.Start()
