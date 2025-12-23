@@ -6,8 +6,9 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 $policyNameBase = "LagGenerator"
-$policyName = $policyNameBase
-$blockRuleName = "$policyNameBase-Block"
+$policyStore = "PersistentStore"
+$policyName = "$policyNameBase-Local"
+$blockRuleName = "$policyName-Block"
 $rates = @(
     @{ BitsPerSecond = 8 * 1024 * 1024; Label = "8 Mbps" },
     @{ BitsPerSecond = 4 * 1024 * 1024; Label = "4 Mbps" },
@@ -40,16 +41,16 @@ function Test-NetQos {
 }
 
 function Apply-Throttle([long]$bps) {
-    $existing = Get-NetQosPolicy -Name $policyName -ErrorAction SilentlyContinue
+    $existing = Get-NetQosPolicy -Name $policyName -PolicyStore $policyStore -ErrorAction SilentlyContinue
     if ($null -eq $existing) {
-        New-NetQosPolicy -Name $policyName -Default -ThrottleRateActionBitsPerSecond $bps | Out-Null
+        New-NetQosPolicy -Name $policyName -PolicyStore $policyStore -Default -ThrottleRateActionBitsPerSecond $bps | Out-Null
     } else {
-        Set-NetQosPolicy -Name $policyName -ThrottleRateActionBitsPerSecond $bps | Out-Null
+        Set-NetQosPolicy -Name $policyName -PolicyStore $policyStore -ThrottleRateActionBitsPerSecond $bps | Out-Null
     }
 }
 
 function Ensure-BlockRule {
-    Remove-NetFirewallRule -DisplayName $blockRuleName -ErrorAction SilentlyContinue | Out-Null
+    Remove-NetFirewallRule -DisplayName $blockRuleName -PolicyStore $policyStore -ErrorAction SilentlyContinue | Out-Null
     $ruleParams = @{
         DisplayName = $blockRuleName
         Direction   = "Outbound"
@@ -57,6 +58,7 @@ function Ensure-BlockRule {
         Enabled     = "False"
         Profile     = "Any"
         Protocol    = "Any"
+        PolicyStore = $policyStore
     }
     if ($targetPorts.Count -gt 0) {
         $ruleParams.RemotePort = ($targetPorts -join ",")
@@ -66,13 +68,13 @@ function Ensure-BlockRule {
 
 function Set-BlockRule([bool]$enabled) {
     $state = if ($enabled) { "True" } else { "False" }
-    Set-NetFirewallRule -DisplayName $blockRuleName -Enabled $state -ErrorAction SilentlyContinue | Out-Null
+    Set-NetFirewallRule -DisplayName $blockRuleName -PolicyStore $policyStore -Enabled $state -ErrorAction SilentlyContinue | Out-Null
 }
 
 function Stop-Lag {
     try {
-        Remove-NetQosPolicy -Name $policyName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-        Remove-NetFirewallRule -DisplayName $blockRuleName -ErrorAction SilentlyContinue | Out-Null
+        Remove-NetQosPolicy -Name $policyName -PolicyStore $policyStore -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+        Remove-NetFirewallRule -DisplayName $blockRuleName -PolicyStore $policyStore -ErrorAction SilentlyContinue | Out-Null
     } catch {
         # Best effort cleanup
     }
@@ -102,9 +104,11 @@ $form.Controls.Add($lblStatus)
 
 $timer = New-Object Windows.Forms.Timer
 $timer.Interval = $StepSeconds * 1000
-$noiseTimer = New-Object Windows.Forms.Timer
+$noiseTimer = New-Object System.Timers.Timer
 $noiseTimer.Interval = $noiseTickMs
-$lossTimer = New-Object Windows.Forms.Timer
+$noiseTimer.AutoReset = $true
+$lossTimer = New-Object System.Timers.Timer
+$lossTimer.AutoReset = $false
 $lossTimer.Interval = 200
 
 $running = $false
@@ -118,6 +122,16 @@ function Update-Status {
         $lblStatus.Text = "Estado: degradando ($rateLabel) + perdida"
     } else {
         $lblStatus.Text = "Estado: degradando ($rateLabel)"
+    }
+}
+
+function Update-StatusSafe {
+    if ($form.InvokeRequired) {
+        $form.BeginInvoke([Action]{
+            Update-Status
+        }) | Out-Null
+    } else {
+        Update-Status
     }
 }
 
@@ -162,7 +176,7 @@ $timer.Add_Tick({
     }
 })
 
-$noiseTimer.Add_Tick({
+$noiseTimer.add_Elapsed({
     try {
         if (-not $running) {
             return
@@ -177,6 +191,7 @@ $noiseTimer.Add_Tick({
                 Set-BlockRule $true
                 $lossTimer.Interval = Get-Random -Minimum $lossDurationMinMs -Maximum ($lossDurationMaxMs + 1)
                 $lossTimer.Start()
+                Update-StatusSafe
             }
         }
     } catch {
@@ -190,11 +205,12 @@ $noiseTimer.Add_Tick({
     }
 })
 
-$lossTimer.Add_Tick({
+$lossTimer.add_Elapsed({
     $lossTimer.Stop()
     if ($lossActive) {
         Set-BlockRule $false
         $lossActive = $false
+        Update-StatusSafe
     }
 })
 
@@ -220,21 +236,6 @@ $btnToggle.Add_Click({
         }
 
         try {
-            $existingPolicy = Get-NetQosPolicy -Name $policyNameBase -ErrorAction SilentlyContinue
-            if ($null -ne $existingPolicy -and $existingPolicy.Owner -ne "Local") {
-                $policyName = "$policyNameBase-Local"
-                $blockRuleName = "$policyName-Block"
-                [System.Windows.Forms.MessageBox]::Show(
-                    "Se detecto una policy '$policyNameBase' administrada por GPO. Se usara '$policyName' local.",
-                    "Lagger",
-                    [System.Windows.Forms.MessageBoxButtons]::OK,
-                    [System.Windows.Forms.MessageBoxIcon]::Information
-                ) | Out-Null
-            } else {
-                $policyName = $policyNameBase
-                $blockRuleName = "$policyName-Block"
-            }
-
             $running = $true
             $stepIndex = 0
             $baseRateBps = $rates[$stepIndex].BitsPerSecond
