@@ -1,0 +1,39 @@
+name: build-release
+
+on:
+  push:
+    branches:
+      - main
+      - releases
+      - releases/**
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ps2exe
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-PackageProvider -Name NuGet -Force
+          Install-Module -Name ps2exe -Scope CurrentUser -Force
+
+      - name: Build exe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Invoke-PS2EXE .\Lagger.ps1 .\dist\Lagger.exe -noConsole -requireAdmin
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}-${{ github.run_number }}
+          name: ${{ github.ref_name }} build ${{ github.run_number }}
+          files: dist/Lagger.exe
+          generate_release_notes: true
