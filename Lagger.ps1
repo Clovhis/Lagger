@@ -5,8 +5,9 @@ param(
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-$policyName = "LagGenerator"
-$blockRuleName = "LagGeneratorBlock"
+$policyNameBase = "LagGenerator"
+$policyName = $policyNameBase
+$blockRuleName = "$policyNameBase-Block"
 $rates = @(
     @{ BitsPerSecond = 8 * 1024 * 1024; Label = "8 Mbps" },
     @{ BitsPerSecond = 4 * 1024 * 1024; Label = "4 Mbps" },
@@ -22,10 +23,10 @@ $targetPorts = @()
 $noiseEnabled = $true
 $lossEnabled = $true
 $jitterEnabled = $true
-$noiseTickMs = 1200
-$lossChancePercent = 35
-$lossDurationMinMs = 120
-$lossDurationMaxMs = 600
+$noiseTickMs = 1000
+$lossChancePercent = 70
+$lossDurationMinMs = 400
+$lossDurationMaxMs = 1200
 $jitterPercent = 0.35
 
 function Test-Admin {
@@ -113,7 +114,11 @@ $lossActive = $false
 
 function Update-Status {
     $rateLabel = $rates[$stepIndex].Label
-    $lblStatus.Text = "Estado: degradando ($rateLabel)"
+    if ($lossActive) {
+        $lblStatus.Text = "Estado: degradando ($rateLabel) + perdida"
+    } else {
+        $lblStatus.Text = "Estado: degradando ($rateLabel)"
+    }
 }
 
 function Apply-Jitter {
@@ -215,11 +220,27 @@ $btnToggle.Add_Click({
         }
 
         try {
+            $existingPolicy = Get-NetQosPolicy -Name $policyNameBase -ErrorAction SilentlyContinue
+            if ($null -ne $existingPolicy -and $existingPolicy.Owner -ne "Local") {
+                $policyName = "$policyNameBase-Local"
+                $blockRuleName = "$policyName-Block"
+                [System.Windows.Forms.MessageBox]::Show(
+                    "Se detecto una policy '$policyNameBase' administrada por GPO. Se usara '$policyName' local.",
+                    "Lagger",
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Information
+                ) | Out-Null
+            } else {
+                $policyName = $policyNameBase
+                $blockRuleName = "$policyName-Block"
+            }
+
             $running = $true
             $stepIndex = 0
             $baseRateBps = $rates[$stepIndex].BitsPerSecond
             Apply-Throttle $baseRateBps
             Ensure-BlockRule
+            Set-BlockRule $false
             Update-Status
             if ($rates.Count -gt 1) {
                 $timer.Start()
