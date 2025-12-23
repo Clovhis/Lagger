@@ -18,14 +18,15 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install ps2exe
-        shell: pwsh
+        shell: powershell
         run: |
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
           Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-          Install-PackageProvider -Name NuGet -Force
-          Install-Module -Name ps2exe -Scope CurrentUser -Force
+          Install-Module -Name ps2exe -Scope CurrentUser -Force -AllowClobber -SkipPublisherCheck
+          Import-Module ps2exe
 
       - name: Build exe
-        shell: pwsh
+        shell: powershell
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Invoke-PS2EXE .\Lagger.ps1 .\dist\Lagger.exe -noConsole -requireAdmin
